@@ -1,33 +1,77 @@
 pipeline {
     agent any
+
+    parameters {
+        choice(
+            name: 'DEPLOY_ENV',
+            choices: ['dev', 'qa', 'prod'],
+            description: 'Ambiente al que se va a desplegar'
+        )
+    }
+
+    environment {
+        TARGET_ENV = "${params.DEPLOY_ENV}"
+    }
+
     stages {
         stage('Test') {
             agent {
-                docker { image 'gradle:jdk21-alpine' }
+                docker { image 'gradle:8-jdk21' }
             }
             steps {
-                dir('app-java-gradle') {
-                    sh '''
-                    ./gradlew --no-daemon test
-                    '''
-                }
+                sh '''
+                    ./gradlew test
+                '''
             }
         }
+
         stage('Docker Build') {
             steps {
                 echo 'Construyendo imagen Docker...'
-                dir('app-java-gradle') {
-                    sh "docker build -t localhost:5000/app-java-gradle:\$(git rev-parse --short HEAD) ."
-                    sh "docker push localhost:5000/app-java-gradle:\$(git rev-parse --short HEAD)"
-                }
+                sh '''
+                    IMAGE_TAG=$(git rev-parse --short HEAD)
+
+                    docker build \
+                        -t localhost:5000/app-java-gradle:${IMAGE_TAG} \
+                        .
+
+                    docker push \
+                        localhost:5000/app-java-gradle:${IMAGE_TAG}
+                '''
             }
         }
+
         stage('Deploy') {
             steps {
-                echo 'Desplegando en el clúster de Kubernetes...'
+                dir('manifests') {
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: '*/main']],
+                        userRemoteConfigs: [[
+                            url: 'git@github.com:Emmanuel-1919/Devops-cicd.git',
+                            credentialsId: 'github-devops-cicd'
+                        ]]
+                    ])
+                }
+
+                echo "Desplegando en el ambiente: ${TARGET_ENV}"
+
                 sh '''
-                    kubectl apply -f k8s/dev/app-java-gradle-deployment.yaml
-                    kubectl set image deployment/app-java-gradle app-java-gradle=local-registry:5000/app-java-gradle:$(git rev-parse --short HEAD) -n dev
+                    IMAGE_TAG=$(git rev-parse --short HEAD)
+
+                    kubectl apply \
+                        --context ${TARGET_ENV} \
+                        -f manifests/k8s/${TARGET_ENV}/app-java-gradle-deployment.yaml
+
+                    kubectl set image \
+                        --context ${TARGET_ENV} \
+                        deployment/app-java-gradle \
+                        app-java-gradle=host.docker.internal:5000/app-java-gradle:${IMAGE_TAG} \
+                        -n ${TARGET_ENV}
+
+                    kubectl apply \
+                        --context ${TARGET_ENV} \
+                        -f manifests/k8s/${TARGET_ENV}/app-java-gradle-service.yaml
                 '''
             }
         }
